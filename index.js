@@ -9,11 +9,35 @@ const S3FS = require('s3fs');
 const bcrypt = require('bcrypt-nodejs');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
+var redis = require("redis");
 
 app.use(cors());
 app.use(bodyParser.json());
 
-app.post('/home' , function (req, res) {
+app.get('/ranking', function (req, res) {
+    const Rclient = redis.createClient(cfg.redis);
+    Rclient.on("error", function (err) { console.error(err); });
+    Rclient.get('rating', async (err, reply) => {
+        if (reply) {
+            Rclient.quit();
+            res.send(reply);
+        }
+        else {
+            const client = new pg.Client(cfg.db);
+            client.connect();
+            client.query(`SELECT u.username, p.nvotes, p.sumvotes, p.url FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID")
+            WHERE nvotes>0 ORDER BY sumvotes / nvotes DESC, nvotes DESC`, (err, result) => {
+                    if (err) { res.end(err) };
+                    Rclient.on("error", function (err) { console.error(err); });
+                    Rclient.set("rating", JSON.stringify(result.rows));
+                    Rclient.quit();
+                    res.send(result.rows);
+                });
+        };
+    });
+});
+
+app.post('/home', function (req, res) {
     user_id = req.body.userid;
     const client = new pg.Client(cfg.db);
     client.connect();
@@ -22,11 +46,7 @@ app.post('/home' , function (req, res) {
     LEFT JOIN "tsac18Rosada".votes v ON (p."ID" = v."ID_photo" AND v."ID_user"=$1) 
     JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID")
     ORDER BY p."ID"`, [user_id], (err, result) => {
-            if (err) {
-                res.status(500).json({
-                    err: err
-                });
-            }
+            if (err) { console.log(err); }
             res.send(result.rows);
             client.end();
         });
@@ -39,12 +59,8 @@ app.post('/photo', function (req, res) {
     client.query(`SELECT p.url, p.sumvotes, p.nvotes, u.username FROM "tsac18Rosada".photos p 
     JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID")
     WHERE p."ID"= $1`, [photo_id], (err, result) => {
-        console.log(result.rows)
-            if (err) {
-                res.status(500).json({
-                    err: err
-                });
-            }
+            if (err) { console.log(err); }
+
             res.send(result.rows);
             client.end();
         });
@@ -62,7 +78,12 @@ app.post('/login', function (req, res) {
                 message: "Unable to provide a valid token, internal error",
                 token: null
             });
-
+        if (!bcrypt.compareSync(password, result.rows[0].password)){
+            return res.status(401).json({
+                message: "No valid Password",
+                token: null
+            });
+        }
         var token = jwt.sign({
             id: result.rows[0].ID,
             username: result.rows[0].username,
@@ -84,36 +105,32 @@ app.post('/sigup', function (req, res) {
     const client = new pg.Client(cfg.db);
     client.connect();
     username = req.body.username;
-    client.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => {
-        if (err)
-            res.status(400).json({
-                message: "Bad Requests",
-                status: 400
-            });
-        if (result.length > 0)
-            res.status(409).json({
-                message: "Conflict, user already exists",
-                status: 409
-            });
-        if (req.body.password.length < 4)
-            res.status(406).json({
-                message: "Not Acceptable, password is too short, min: 4",
-                status: 406
-            });
-
-        password = bcrypt.hashSync(req.body.password, null, null);
-        email = req.body.email
-
-        client.query('INSERT INTO "tsac18Rosada"."user"(username, password, email) VALUES ($1, $2, $3);', [username, password, email], function (err, rows, fields) {
-            if (err)
-                res.status(400).json({
-                    message: "Bad Requests",
-                    status: 400
+    client.query('BEGIN', (err) => {
+        if (err) { console.log(err); }
+        client.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => {
+            if (err) { console.log(err); }
+            if (result.length > 0)
+                res.status(409).json({
+                    message: "Conflict, user already exists",
+                    status: 409
                 });
-            res.status(200).send();
+            if (req.body.password.length < 4)
+                res.status(406).json({
+                    message: "Not Acceptable, password is too short, min: 4",
+                    status: 406
+                });
+            email = req.body.email
+            password = bcrypt.hashSync(req.body.password, null, null);
+            client.query('INSERT INTO "tsac18Rosada"."user"(username, password, email) VALUES ($1, $2, $3);', [username, password, email], (err, result) => {
+                if (err) { console.log(err); }
+                client.query('COMMIT', (err) => {
+                    if (err) { console.log(err); }
+                    client.end();
+                    res.status(200).send();
+                });
+            });
         });
-        client.end();
-    })
+    });
 });
 
 
@@ -140,9 +157,7 @@ app.post('/upload', function (req, res) {
         var fileStream = fs.createReadStream(req.file.path);
         return s3fsImpl.writeFile(req.file.filename, fileStream, { ACL: 'public-read' }).then(function () {
             fs.unlink(req.file.path, (err) => {
-                if (err) {
-                    console.error(err);
-                }
+                if (err) { console.error(err); }
             });
             res.status(200).send();
         });
@@ -155,26 +170,20 @@ app.post('/vote', function (req, res) {
     id_user = req.body.id_user;
     const client = new pg.Client(cfg.db);
     client.connect();
-
-    client.query('INSERT INTO "tsac18Rosada".votes(vote,"ID_photo", "ID_user") VALUES ($1, $2, $3);', [vote, id_photo, id_user], function (err, rows, fields) {
-        if (err) {
-            res.status(400).json({
-                message: "Bad Requests",
-                status: 400
+    client.query('BEGIN', (err) => {
+        if (err) { console.log(err); }
+        client.query('INSERT INTO "tsac18Rosada".votes(vote,"ID_photo", "ID_user") VALUES ($1, $2, $3);', [vote, id_photo, id_user], (err, result) => {
+            if (err) { res.end(err) };
+            client.query('UPDATE "tsac18Rosada".photos SET nvotes=nvotes+1, sumvotes=sumvotes+$1 WHERE "ID"=$2', [vote, id_photo], (err, result) => {
+                if (err) { res.end(err) };
+                client.query('COMMIT', (err) => {
+                    if (err) { res.end(err) };
+                    client.end();
+                    res.status(200).send();
+                });
             });
-        }
+        });
     });
-    client.query('UPDATE "tsac18Rosada".photos SET nvotes=nvotes+1, sumvotes=sumvotes+$1 WHERE "ID"=$2', [vote, id_photo], function (err, rows, fields) {
-        if (err)
-            res.status(400).json({
-                message: "Bad Requests",
-                status: 400
-            });
-        res.status(200).send();
-        client.end();
-    });
-
 });
-
 
 app.listen(3000);
