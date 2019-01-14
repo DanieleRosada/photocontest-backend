@@ -17,7 +17,8 @@ app.use(bodyParser.json());
 
 app.get('/ranking', verifyToken, function (req, res) {
     const Rclient = redis.createClient(cfg.redis);
-    Rclient.on("error", function (err) {res.send(err); });
+    Rclient.on("error", function (err) { res.send(err); });
+    Rclient.auth (cfg.redisPassword, function (err) {res.send(err); });
     Rclient.get('rating', async (err, reply) => {
         if (reply) {
             Rclient.quit();
@@ -31,7 +32,8 @@ app.get('/ranking', verifyToken, function (req, res) {
             WHERE nvotes>0 ORDER BY rating DESC LIMIT 20`, [3, 1], (err, result) => {
                     if (err) { res.end(err) };
                     Rclient.on("error", function (err) { res.send(err); });
-                    Rclient.set("rating", JSON.stringify(result.rows));
+                    console.log("qua");
+                    Rclient.setex("rating", 14400 ,JSON.stringify(result.rows)); //ogni 4 ore aggiorno la classifica
                     Rclient.quit();
                     client.end();
                     res.send(result.rows);
@@ -42,7 +44,8 @@ app.get('/ranking', verifyToken, function (req, res) {
 
 app.get('/userranking', verifyToken, function (req, res) {
     const Rclient = redis.createClient(cfg.redis);
-    Rclient.on("error", function (err) {res.send(err); });
+    Rclient.on("error", function (err) { res.send(err); });
+    Rclient.auth (cfg.redisPassword, function (err) {res.send(err); });
     Rclient.get('userranking', async (err, reply) => {
         if (reply) {
             Rclient.quit();
@@ -56,7 +59,7 @@ app.get('/userranking', verifyToken, function (req, res) {
             GROUP BY u.username, u.email ORDER BY sumvotes DESC, nvotes DESC LIMIT 20`, (err, result) => {
                     if (err) { res.end(err) };
                     Rclient.on("error", function (err) { res.send(err); });
-                    Rclient.set("userranking", JSON.stringify(result.rows));
+                    Rclient.setex("userranking", 14400 ,JSON.stringify(result.rows));
                     Rclient.quit();
                     client.end();
                     res.send(result.rows);
@@ -100,12 +103,17 @@ app.post('/login', function (req, res) {
     const client = new pg.Client(cfg.db);
     client.connect();
     client.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => {
-        if (err){
+        if (err) {
             res.status(500).json({
                 message: "Unable to provide a valid token, internal error",
                 token: null
             });
         }
+        if (!result.rows[0])
+            return res.status(400).json({
+                message: "Unable to found user: " + username,
+                token: null
+            });
         if (!bcrypt.compareSync(password, result.rows[0].password)) {
             return res.status(401).json({
                 message: "No valid Password",
@@ -136,13 +144,13 @@ app.post('/sigup', function (req, res) {
         if (err) { res.send(err); }
         client.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => {
             if (err) { res.send(err); }
-            if (result.length > 0){
+            if (result.length > 0) {
                 res.status(409).json({
                     message: "Conflict, user already exists",
                     status: 409
                 });
             }
-            if (req.body.password.length < 4){
+            if (req.body.password.length < 4) {
                 res.status(406).json({
                     message: "Not Acceptable, password is too short, min: 4",
                     status: 406
@@ -177,7 +185,7 @@ app.post('/upload', verifyToken, function (req, res) {
     var upload = multer({
         storage: Storage
     }).single("photo");
-    
+
     upload(req, res, function (err) {
         if (err) {
             res.send("Something went wrong!");
@@ -200,15 +208,18 @@ app.post('/vote', verifyToken, function (req, res) {
     const client = new pg.Client(cfg.db);
     client.connect();
     client.query('BEGIN', (err) => {
-        if (err) {  res.end(err); }
-        client.query('INSERT INTO "tsac18Rosada".votes(vote,"ID_photo", "ID_user") VALUES ($1, $2, $3);', [vote, id_photo, id_user], (err, result) => {
-            if (err) { res.end(err) };
-            client.query('UPDATE "tsac18Rosada".photos SET nvotes=nvotes+1, sumvotes=sumvotes+$1 WHERE "ID"=$2', [vote, id_photo], (err, result) => {
-                if (err) { res.end(err) };
-                client.query('COMMIT', (err) => {
-                    if (err) { res.end(err) };
-                    client.end();
-                    res.status(200).send();
+        if (err) { res.end(err); }
+        client.query('SELECT * FROM "tsac18Rosada".votes WHERE "ID_user"=$1 AND "ID_photo"=$2', [id_user, id_photo], (err, result) => { //gestione errore 2 profili aperti che votano la stessa foto
+            if (result.rows[0] || err) { res.end(); }
+            client.query('INSERT INTO "tsac18Rosada".votes("ID_user","ID_photo",vote) VALUES ($1, $2, $3);', [id_user, id_photo, vote], (err, result) => {
+                if (err) { res.end(err); };
+                client.query('UPDATE "tsac18Rosada".photos SET nvotes=nvotes+1, sumvotes=sumvotes+$1 WHERE "ID"=$2', [vote, id_photo], (err, result) => {
+                    if (err) { res.end(err); };
+                    client.query('COMMIT', (err) => {
+                        if (err) { res.end(err) };
+                        client.end();
+                        res.status(200).send();
+                    });
                 });
             });
         });
