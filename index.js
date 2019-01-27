@@ -1,108 +1,83 @@
-const express = require('express');
-const app = express();
+const app = require('express')();
 const cors = require('cors');
-const bodyParser = require('body-parser')
+const bodyParser = require('body-parser');
 const cfg = require('./config');
-const pg = require('pg');
-const fs = require('fs');
-const S3FS = require('s3fs');
+const postgres = require('./structure/postgres.js');
+const redis = require('./structure/redis.js');
+const rabbit = require('./structure/rabbit.js');
+const s3Upload = require('./structure/s3upload.js');
+const elasticSearch = require('./structure/elasticsearch.js');
 const bcrypt = require('bcrypt-nodejs');
 const jwt = require('jsonwebtoken');
-const multer = require('multer');
-const redis = require("redis");
 const verifyToken = require("./auth/verifyToken");
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(cors());
 app.use(bodyParser.json());
 
-app.get('/ranking', verifyToken, function (req, res) {
-    const Rclient = redis.createClient(cfg.redis);
-    Rclient.on("error", function (err) { res.send(err); });
-    Rclient.auth (cfg.redisPassword, function (err) {res.send(err); });
-    Rclient.get('rating', async (err, reply) => {
+app.get('/ranking/photos', verifyToken, function (req, res) {
+    redis.get('photosRanking', async (err, reply) => {
         if (reply) {
-            Rclient.quit();
             res.send(reply);
         }
         else {
-            const client = new pg.Client(cfg.db);
-            client.connect();
-            client.query(`SELECT u.username, p.nvotes, p."ID", p.sumvotes, p.url,  ($1 * p.sumvotes / p.nvotes) + ($2 *  p.nvotes) as rating
+            postgres.query(`SELECT u.username, p."ID", p.nvotes, p.sumvotes, p.url, p.thumbnail,  ($1 * p.sumvotes / p.nvotes) + ($2 *  p.nvotes) as ranking
             FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID")
-            WHERE nvotes>0 ORDER BY rating DESC LIMIT 20`, [3, 1], (err, result) => {
+            WHERE nvotes>0 ORDER BY ranking DESC LIMIT 20`, [2, 1], (err, result) => {
                     if (err) { res.end(err) };
-                    Rclient.on("error", function (err) { res.send(err); });
-                    console.log("qua");
-                    Rclient.setex("rating", 14400 ,JSON.stringify(result.rows)); //ogni 4 ore aggiorno la classifica
-                    Rclient.quit();
-                    client.end();
+                    redis.setex("photosRanking", 14400, JSON.stringify(result.rows)); //reload every 4 hours
                     res.send(result.rows);
                 });
-        };
+        }
     });
 });
 
-app.get('/userranking', verifyToken, function (req, res) {
-    const Rclient = redis.createClient(cfg.redis);
-    Rclient.on("error", function (err) { res.send(err); });
-    Rclient.auth (cfg.redisPassword, function (err) {res.send(err); });
-    Rclient.get('userranking', async (err, reply) => {
+app.get('/ranking/users', verifyToken, function (req, res) {
+    redis.get('userRanking', async (err, reply) => {
         if (reply) {
-            Rclient.quit();
             res.send(reply);
         }
         else {
-            const client = new pg.Client(cfg.db);
-            client.connect();
-            client.query(`SELECT u.username, SUM(p.nvotes) as nvotes, SUM(p.sumvotes) as sumvotes, COUNT(p."ID") as nphotos
+            postgres.query(`SELECT u.username, SUM(p.nvotes) as nvotes, SUM(p.sumvotes) as sumvotes, COUNT(p."ID") as nphotos, 
+            ($1 * SUM(p.sumvotes) /  SUM(p.nvotes)) + ($2 *  SUM(p.nvotes))+ ($3 * COUNT(p."ID")) as ranking
             FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID")
-            GROUP BY u.username, u.email ORDER BY sumvotes DESC, nvotes DESC LIMIT 20`, (err, result) => {
+            GROUP BY u.username, u.email ORDER BY ranking DESC LIMIT 20`, [10, 3, 1], (err, result) => {
                     if (err) { res.end(err) };
-                    Rclient.on("error", function (err) { res.send(err); });
-                    Rclient.setex("userranking", 14400 ,JSON.stringify(result.rows));
-                    Rclient.quit();
-                    client.end();
+                    redis.setex("userRanking", 14400, JSON.stringify(result.rows)); //reload every 4 hours
                     res.send(result.rows);
                 });
-        };
+        }
     });
 });
 
-app.post('/home', verifyToken, function (req, res) {
-    user_id = req.body.userid;
-    const client = new pg.Client(cfg.db);
-    client.connect();
-    client.query(`SELECT v."ID_photo" as voteIdPhoto, v."ID_user" as voteIdUser, p."ID", p.url, p."ID_user", 
-    p.sumvotes, p.nvotes, u.username FROM "tsac18Rosada".photos p 
+app.post('/photos', verifyToken, function (req, res) {
+    let user_id = req.body.userid;
+    postgres.query(`SELECT v."ID_photo" as voteIdPhoto, v."ID_user" as voteIdUser, p."ID", p.url, p."ID_user", 
+    p.sumvotes, p.nvotes, p.thumbnail, u.username FROM "tsac18Rosada".photos p 
     LEFT JOIN "tsac18Rosada".votes v ON (p."ID" = v."ID_photo" AND v."ID_user"=$1) 
     JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID")
     ORDER BY p."ID"`, [user_id], (err, result) => {
             if (err) { res.send(err); }
             res.send(result.rows);
-            client.end();
         });
 });
 
 app.post('/photo', verifyToken, function (req, res) {
-    photo_id = req.body.idphoto;
-    const client = new pg.Client(cfg.db);
-    client.connect();
-    client.query(`SELECT p.url, p.sumvotes, p.nvotes, u.username FROM "tsac18Rosada".photos p 
+    let photo_id = req.body.idphoto;
+    postgres.query(`SELECT p.url, p.sumvotes, p.nvotes, p.description, p.title, p.original_name, u.username, u.email FROM "tsac18Rosada".photos p 
     JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID")
-    WHERE p."ID"= $1`, [photo_id], (err, result) => {
+    WHERE p."ID"=$1`, [photo_id], (err, result) => {
             if (err) { res.send(err); }
             res.send(result.rows);
-            client.end();
         });
 });
 
 
 app.post('/login', function (req, res) {
-    username = req.body.username;
-    password = req.body.password;
-    const client = new pg.Client(cfg.db);
-    client.connect();
-    client.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => {
+    let username = req.body.username;
+    let password = req.body.password;
+    postgres.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => {
         if (err) {
             res.status(500).json({
                 message: "Unable to provide a valid token, internal error",
@@ -120,16 +95,18 @@ app.post('/login', function (req, res) {
                 token: null
             });
         }
+
         var token = jwt.sign({
             id: result.rows[0].ID,
             username: result.rows[0].username,
         }, cfg.secret, {
-                expiresIn: 60 * 60 * 4
+                expiresIn: 4 * 60 * 60 //duration 4 hours
             });
-        client.end();
+
         res.status(200).json({
             id: result.rows[0].ID,
             username: result.rows[0].username,
+            email: result.rows[0].email,
             token: token
         });
     });
@@ -137,12 +114,10 @@ app.post('/login', function (req, res) {
 
 
 app.post('/sigup', function (req, res) {
-    username = req.body.username;
-    const client = new pg.Client(cfg.db);
-    client.connect();
-    client.query('BEGIN', (err) => {
+    let username = req.body.username;
+    postgres.query('BEGIN', (err) => {
         if (err) { res.send(err); }
-        client.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => {
+        postgres.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => { //check if there is a user with the same username
             if (err) { res.send(err); }
             if (result.length > 0) {
                 res.status(409).json({
@@ -152,17 +127,16 @@ app.post('/sigup', function (req, res) {
             }
             if (req.body.password.length < 4) {
                 res.status(406).json({
-                    message: "Not Acceptable, password is too short, min: 4",
+                    message: "Not acceptable, password is too short, min: 4",
                     status: 406
                 });
             }
-            email = req.body.email
-            password = bcrypt.hashSync(req.body.password, null, null);
-            client.query('INSERT INTO "tsac18Rosada"."user"(username, password, email) VALUES ($1, $2, $3);', [username, password, email], (err, result) => {
+            let email = req.body.email
+            let password = bcrypt.hashSync(req.body.password, null, null);
+            postgres.query('INSERT INTO "tsac18Rosada"."user"(username, password, email) VALUES ($1, $2, $3);', [username, password, email], (err, result) => {
                 if (err) { res.send(err); }
-                client.query('COMMIT', (err) => {
+                postgres.query('COMMIT', (err) => {
                     if (err) { res.send(err); }
-                    client.end();
                     res.status(200).send();
                 });
             });
@@ -171,59 +145,94 @@ app.post('/sigup', function (req, res) {
 });
 
 
-app.post('/upload', verifyToken, function (req, res) {
-    s3fsImpl = new S3FS('tsac18-rosada/photocontest', cfg.aws)
-    var Storage = multer.diskStorage({
-        destination: function (req, file, cb) {
-            cb(null, "./uploads");
-        },
-        filename: function (req, file, cb) {
-            cb(null, Date.now() + "_" + file.originalname);
-        }
-    });
-
-    var upload = multer({
-        storage: Storage
-    }).single("photo");
-
-    upload(req, res, function (err) {
-        if (err) {
-            res.send("Something went wrong!");
-        }
-
-        var fileStream = fs.createReadStream(req.file.path);
-        return s3fsImpl.writeFile(req.file.filename, fileStream, { ACL: 'public-read' }).then(function () {
-            fs.unlink(req.file.path, (err) => {
+app.post('/upload', upload.single("photo"), verifyToken, function (req, res) {
+    let file = req.file;
+    let title = req.body.title;
+    let description = req.body.description;
+    let user_id = req.body.userid;
+    let filename = Date.now() + file.originalname;
+    let url = "https://d2yaijk2mdn651.cloudfront.net/photocontest/" + filename;
+    s3Upload.writeFile(filename, file.buffer, { ACL: 'public-read' }).then(function () {
+        postgres.query(`INSERT INTO "tsac18Rosada".photos(url, "ID_user", nvotes, title, description, original_name, sumvotes) 
+        VALUES ($1, $2, 0, $3, $4, $5, 0);`, [url, user_id, title, description, file.originalname], (err, result) => {
                 if (err) { res.send(err); }
+                res.status(200).send();
+                rabbit.sendToQueue('url', url);
             });
-            res.status(200).send();
-        });
     });
 });
 
 app.post('/vote', verifyToken, function (req, res) {
-    vote = req.body.vote;
-    id_photo = req.body.id_photo;
-    id_user = req.body.id_user;
-    const client = new pg.Client(cfg.db);
-    client.connect();
-    client.query('BEGIN', (err) => {
+    let vote = req.body.vote;
+    let id_photo = req.body.idphoto;
+    let id_user = req.body.iduser;
+    postgres.query('BEGIN', (err) => {
         if (err) { res.end(err); }
-        client.query('SELECT * FROM "tsac18Rosada".votes WHERE "ID_user"=$1 AND "ID_photo"=$2', [id_user, id_photo], (err, result) => { //gestione errore 2 profili aperti che votano la stessa foto
+        postgres.query('SELECT * FROM "tsac18Rosada".votes WHERE "ID_user"=$1 AND "ID_photo"=$2', [id_user, id_photo], (err, result) => { //vote with 2 profile in the same time
             if (result.rows[0] || err) { res.end(); }
-            client.query('INSERT INTO "tsac18Rosada".votes("ID_user","ID_photo",vote) VALUES ($1, $2, $3);', [id_user, id_photo, vote], (err, result) => {
+            postgres.query('INSERT INTO "tsac18Rosada".votes("ID_user","ID_photo",vote) VALUES ($1, $2, $3);', [id_user, id_photo, vote], (err, result) => {
                 if (err) { res.end(err); };
-                client.query('UPDATE "tsac18Rosada".photos SET nvotes=nvotes+1, sumvotes=sumvotes+$1 WHERE "ID"=$2', [vote, id_photo], (err, result) => {
+                postgres.query('UPDATE "tsac18Rosada".photos SET nvotes=nvotes+1, sumvotes=sumvotes+$1 WHERE "ID"=$2', [vote, id_photo], (err, result) => {
                     if (err) { res.end(err); };
-                    client.query('COMMIT', (err) => {
+                    postgres.query('COMMIT', (err) => {
                         if (err) { res.end(err) };
-                        client.end();
                         res.status(200).send();
                     });
                 });
             });
         });
     });
+});
+
+app.post('/owenphotos', verifyToken, function (req, res) {
+    let user_id = req.body.userid;
+    postgres.query(`SELECT "ID", nvotes, thumbnail, title, sumvotes, url FROM "tsac18Rosada".photos WHERE "ID_user"=$1`, [user_id], (err, result) => {
+        if (err) { res.send(err); }
+        res.send(result.rows);
+    });
+});
+
+app.post('/deletephoto', verifyToken, function (req, res) {
+    let photo_id = req.body.idphoto;
+    postgres.query('BEGIN', (err) => {
+        if (err) { res.end(err); }
+        postgres.query('DELETE FROM "tsac18Rosada".votes WHERE "ID_photo"=$1', [photo_id], (err, result) => {
+            if (err) { res.end(err); };
+            postgres.query('DELETE FROM "tsac18Rosada".photos WHERE "ID"=$1', [photo_id], (err, result) => {
+                if (err) { res.end(err); };
+                postgres.query('COMMIT', (err) => {
+                    if (err) { res.end(err) };
+                    res.status(200).send();
+                });
+            });
+        });
+    });
+});
+
+app.post('/search', verifyToken, async function (req, res) {
+    let search = req.body.search;
+    let user_id = req.body.userid;
+    let query = `SELECT p."ID" as key, p.title, p.description, p.original_name, u.username FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID");`;
+    let match = {
+        match: { "username": search },
+        match: { "title": search },
+        match: { "description": search },
+        match: { "orginal_name": search }
+    };
+    await elasticSearch.checkIndices("photos");
+    await elasticSearch.checkBulk("photos", "users", query);
+    await elasticSearch.checkBulk("photos", "users", match);
+    // postgres.query(`SELECT v."ID_photo" as voteIdPhoto, v."ID_user" as voteIdUser, p."ID", p.url, p."ID_user", 
+    // p.sumvotes, p.nvotes, p.thumbnail, u.username FROM "tsac18Rosada".photos p 
+    // LEFT JOIN "tsac18Rosada".votes v ON (p."ID" = v."ID_photo" AND v."ID_user"=$1) 
+    // JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID") WHERE = ANY($2)
+    // ORDER BY p."ID"`, [user_id, array], (err, result) => {
+    //     res.send(result);
+    // });
+});
+
+app.get("/user", verifyToken, function (req, res) {
+    res.send();
 });
 
 app.listen(3000);
