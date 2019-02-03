@@ -5,8 +5,10 @@ const cfg = require("../config");
 const conn = elasticsearch.Client(cfg.elasticsearch);
 
 module.exports = {
-    checkIndices: async (index) => {
+    checkIndices: async function (index) {
+        console.log("checkIndices");
         if (!conn.indices.exists({ index: index })) { //se esiste l'indice sennò lo creo
+        console.log("createIndices");
             await conn.indices.create({
                 index: index
             }, function (err, resp, status) {
@@ -19,27 +21,33 @@ module.exports = {
             });
         }
     },
-    checkBulk: async (index, type, query) => {
+    checkBulk: async function (index, type, query) {
+        console.log("checkBulk");
         if (!conn.exists({ index: index, type: type, id: '1' })) { //document exist sennò lo creo
             await postgres.query(query, async (err, result) => {
-                console.log("secondo")
-                let myBody;
+                console.log("createBulk")
+                let myBody = [];
                 for (let i = 0; index < result.length; i++) {
-                    myBody += { index: { _index: index, _type: type, _id: i } }, result[i] + ",";
+                    myBody.push({ index: { _index: index, _type: type, _id: i, timeout: '30m' } }, result[i]);
                 };
                 console.log(myBody)
                 await conn.bulk({
-                    body: [myBody]
+                    body: myBody
                 });
             });
         }
     },
-    search: async (index, type, query) => {
+    search: async function (index, type, search) {
         conn.search({
             index: index,
             type: type,
             body: {
-                query: query,
+                query: {
+                  multi_match: {
+                    query: search,
+                    fields: ['username','description', "title", "original_name"]
+                  }
+                }
             }
         }, function (error, response, status) {
             if (error) {
@@ -54,6 +62,23 @@ module.exports = {
                 })
             }
         });
+    },
+    deleteBulk: async function (index, type, id){
+        await   client.deleteByQuery({
+            index: index,
+            type: type,
+            body: {
+               query: {
+                   match: { }
+               }
+            }
+        }, function (error, response) {
+            console.log(response);
+      });
+    },
+    deleteIndex: async function (index){
+        client.indices.delete({
+            index: index});
     }
 }
 

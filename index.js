@@ -12,6 +12,7 @@ const jwt = require('jsonwebtoken');
 const verifyToken = require("./auth/verifyToken");
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage() });
+const consumer = require("./consumer/consumer")
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -213,15 +214,10 @@ app.post('/search', verifyToken, async function (req, res) {
     let search = req.body.search;
     let user_id = req.body.userid;
     let query = `SELECT p."ID" as key, p.title, p.description, p.original_name, u.username FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID");`;
-    let match = {
-        match: { "username": search },
-        match: { "title": search },
-        match: { "description": search },
-        match: { "orginal_name": search }
-    };
     await elasticSearch.checkIndices("photos");
     await elasticSearch.checkBulk("photos", "users", query);
-    await elasticSearch.checkBulk("photos", "users", match);
+    await elasticSearch.checkBulk("photos", "users", search);
+    await res.send();
     // postgres.query(`SELECT v."ID_photo" as voteIdPhoto, v."ID_user" as voteIdUser, p."ID", p.url, p."ID_user", 
     // p.sumvotes, p.nvotes, p.thumbnail, u.username FROM "tsac18Rosada".photos p 
     // LEFT JOIN "tsac18Rosada".votes v ON (p."ID" = v."ID_photo" AND v."ID_user"=$1) 
