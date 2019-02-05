@@ -5,48 +5,51 @@ const cfg = require("../config");
 const conn = elasticsearch.Client(cfg.elasticsearch);
 
 module.exports = {
-    checkIndices: async function (index) {
-        console.log("checkIndices");
-        if (!conn.indices.exists({ index: index })) { //se esiste l'indice sennò lo creo
-        console.log("createIndices");
-            await conn.indices.create({
-                index: index
-            }, function (err, resp, status) {
-                if (err) {
-                    console.log(err);
-                }
-                else {
-                    console.log("create", resp);
-                }
-            });
-        }
+    checkIndices: function (index) {
+        console.log("checkIndices")
+        conn.indices.exists({ index: index }, function (r, q) { //se esiste l'indice sennò lo creo 
+        console.log(q)
+            if (!q) {
+                console.log("createIndices");
+                conn.indices.create({
+                    index: index
+                }, function (err, resp, status) {
+                    if (err) {
+                        console.log(err);
+                    }
+                    else {
+                        console.log("create", resp);
+                    }
+                });
+            }
+        });
     },
-    checkBulk: async function (index, type, query) {
+    checkBulk: function (index, type, query) {
         console.log("checkBulk");
-        if (!conn.exists({ index: index, type: type, id: '1' })) { //document exist sennò lo creo
-            await postgres.query(query, async (err, result) => {
-                console.log("createBulk")
+        if (conn.count({ index: index, type: type }) == 0) { //document exist sennò lo creo
+            postgres.query(query, async (err, result) => {
+                console.log("createbulk");
                 let myBody = [];
-                for (let i = 0; index < result.length; i++) {
-                    myBody.push({ index: { _index: index, _type: type, _id: i, timeout: '30m' } }, result[i]);
+                for (let i = 0; i < result.rowCount; i++) {
+                    myBody.push({ index: { _index: index, _type: type, _id: i, _ttl: "30m" } }, result.rows[i]);
                 };
-                console.log(myBody)
-                await conn.bulk({
+                conn.bulk({
                     body: myBody
                 });
             });
         }
     },
-    search: async function (index, type, search) {
-        conn.search({
+    search: function (index, type, search) {
+        console.log("search")
+        conn.msearch({
             index: index,
             type: type,
             body: {
                 query: {
-                  multi_match: {
-                    query: search,
-                    fields: ['username','description', "title", "original_name"]
-                  }
+                    match: {
+                        query: search,
+                        fields: ['username', 'description', "title", "original_name"]
+                    }
                 }
             }
         }, function (error, response, status) {
@@ -63,22 +66,23 @@ module.exports = {
             }
         });
     },
-    deleteBulk: async function (index, type, id){
-        await   client.deleteByQuery({
+    deleteBulk: async function (index, type, id) {
+        await client.deleteByQuery({
             index: index,
             type: type,
             body: {
-               query: {
-                   match: { }
-               }
+                query: {
+                    match: {}
+                }
             }
         }, function (error, response) {
             console.log(response);
-      });
+        });
     },
-    deleteIndex: async function (index){
-        client.indices.delete({
-            index: index});
+    deleteIndex: async function (index) {
+        conn.indices.delete({
+            index: index
+        });
     }
 }
 

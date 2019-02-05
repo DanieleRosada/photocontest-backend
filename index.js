@@ -12,7 +12,7 @@ const jwt = require('jsonwebtoken');
 const verifyToken = require("./auth/verifyToken");
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage() });
-const consumer = require("./consumer/consumer")
+const consumer = require("./consumer/consumer");
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -76,73 +76,73 @@ app.post('/photo', verifyToken, function (req, res) {
 
 
 app.post('/login', function (req, res) {
-    let username = req.body.username;
-    let password = req.body.password;
-    postgres.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => {
-        if (err) {
-            res.status(500).json({
-                message: "Unable to provide a valid token, internal error",
-                token: null
-            });
-        }
-        if (!result.rows[0])
-            return res.status(400).json({
-                message: "Unable to found user: " + username,
-                token: null
-            });
-        if (!bcrypt.compareSync(password, result.rows[0].password)) {
-            return res.status(401).json({
-                message: "No valid Password",
-                token: null
-            });
-        }
-
-        var token = jwt.sign({
-            id: result.rows[0].ID,
-            username: result.rows[0].username,
-        }, cfg.secret, {
-                expiresIn: 4 * 60 * 60 //duration 4 hours
-            });
-
-        res.status(200).json({
-            id: result.rows[0].ID,
-            username: result.rows[0].username,
-            email: result.rows[0].email,
-            token: token
+let username = req.body.username;
+let password = req.body.password;
+postgres.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => {
+    if (err) {
+        res.status(500).json({
+            message: "Unable to provide a valid token, internal error",
+            token: null
         });
+    }
+    if (!result.rows[0])
+        return res.status(400).json({
+            message: "Unable to found user: " + username,
+            token: null
+        });
+    if (!bcrypt.compareSync(password, result.rows[0].password)) {
+        return res.status(401).json({
+            message: "No valid Password",
+            token: null
+        });
+    }
+
+    var token = jwt.sign({
+        id: result.rows[0].ID,
+        username: result.rows[0].username,
+    }, cfg.secret, {
+            expiresIn: 4 * 60 * 60 //duration 4 hours
+        });
+
+    res.status(200).json({
+        id: result.rows[0].ID,
+        username: result.rows[0].username,
+        email: result.rows[0].email,
+        token: token
     });
+});
 });
 
 
 app.post('/sigup', function (req, res) {
-    let username = req.body.username;
-    postgres.query('BEGIN', (err) => {
+let username = req.body.username;
+postgres.query('BEGIN', (err) => {
+    if (err) { res.send(err); }
+    postgres.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => { //check if there is a user with the same username
         if (err) { res.send(err); }
-        postgres.query('SELECT * FROM "tsac18Rosada"."user" WHERE username=$1;', [username], (err, result) => { //check if there is a user with the same username
+        if (result.length > 0) {
+            res.status(409).json({
+                message: "Conflict, user already exists",
+                status: 409
+            });
+        }
+        if (req.body.password.length < 4) {
+            res.status(406).json({
+                message: "Not acceptable, password is too short, min: 4",
+                status: 406
+            });
+        }
+        let email = req.body.email
+        let password = bcrypt.hashSync(req.body.password, null, null);
+        postgres.query('INSERT INTO "tsac18Rosada"."user"(username, password, email) VALUES ($1, $2, $3);', [username, password, email], (err, result) => {
             if (err) { res.send(err); }
-            if (result.length > 0) {
-                res.status(409).json({
-                    message: "Conflict, user already exists",
-                    status: 409
-                });
-            }
-            if (req.body.password.length < 4) {
-                res.status(406).json({
-                    message: "Not acceptable, password is too short, min: 4",
-                    status: 406
-                });
-            }
-            let email = req.body.email
-            let password = bcrypt.hashSync(req.body.password, null, null);
-            postgres.query('INSERT INTO "tsac18Rosada"."user"(username, password, email) VALUES ($1, $2, $3);', [username, password, email], (err, result) => {
+            postgres.query('COMMIT', (err) => {
                 if (err) { res.send(err); }
-                postgres.query('COMMIT', (err) => {
-                    if (err) { res.send(err); }
-                    res.status(200).send();
-                });
+                res.status(200).send();
             });
         });
     });
+});
 });
 
 
@@ -215,9 +215,11 @@ app.post('/search', verifyToken, async function (req, res) {
     let user_id = req.body.userid;
     let query = `SELECT p."ID" as key, p.title, p.description, p.original_name, u.username FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID");`;
     await elasticSearch.checkIndices("photos");
-    await elasticSearch.checkBulk("photos", "users", query);
-    await elasticSearch.checkBulk("photos", "users", search);
+    //await elasticSearch.checkBulk("photos", "users", query);
+    //await elasticSearch.search("photos", "users", search);
+    //await elasticSearch.deleteIndex("photos")
     await res.send();
+    console.log("hello")
     // postgres.query(`SELECT v."ID_photo" as voteIdPhoto, v."ID_user" as voteIdUser, p."ID", p.url, p."ID_user", 
     // p.sumvotes, p.nvotes, p.thumbnail, u.username FROM "tsac18Rosada".photos p 
     // LEFT JOIN "tsac18Rosada".votes v ON (p."ID" = v."ID_photo" AND v."ID_user"=$1) 
