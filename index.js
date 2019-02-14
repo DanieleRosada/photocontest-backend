@@ -27,25 +27,27 @@ app.get('/ranking/photos', verifyToken, function (req, res) {
             FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID")
             WHERE nvotes>0 ORDER BY ranking DESC LIMIT 20`, [2, 1], (err, result) => {
                     if (err) { res.end(err) };
+
                     redis.setex("photosRanking", 14400, JSON.stringify(result.rows)); //reload every 4 hours
                     res.send(result.rows);
+
                 });
         }
     });
 });
 
 app.get('/ranking/users', verifyToken, function (req, res) {
-    redis.get('userRanking', async (err, reply) => {
+    redis.get('usersRanking', async (err, reply) => {
         if (reply) {
             res.send(reply);
         }
         else {
             postgres.query(`SELECT u.username, SUM(p.nvotes) as nvotes, SUM(p.sumvotes) as sumvotes, COUNT(p."ID") as nphotos, 
             ($1 * SUM(p.sumvotes) /  SUM(p.nvotes)) + ($2 *  SUM(p.nvotes))+ ($3 * COUNT(p."ID")) as ranking
-            FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID")
+            FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID") WHERE p.nvotes>0
             GROUP BY u.username, u.email ORDER BY ranking DESC LIMIT 20`, [10, 3, 1], (err, result) => {
                     if (err) { res.end(err) };
-                    redis.setex("userRanking", 14400, JSON.stringify(result.rows)); //reload every 4 hours
+                    redis.setex("usersRanking", 14400, JSON.stringify(result.rows)); //reload every 4 hours
                     res.send(result.rows);
                 });
         }
@@ -85,14 +87,9 @@ app.post('/login', function (req, res) {
                 token: null
             });
         }
-        if (!result.rows[0])
-            return res.status(400).json({
-                message: "Unable to found user: " + username,
-                token: null
-            });
-        if (!bcrypt.compareSync(password, result.rows[0].password)) {
+        if (!result.rows[0] || !bcrypt.compareSync(password, result.rows[0].password)) {
             return res.status(401).json({
-                message: "No valid Password",
+                message: "Invalid password or username",
                 token: null
             });
         }
@@ -214,11 +211,10 @@ app.post('/search', verifyToken, async function (req, res) {
     let search = req.body.search;
     let user_id = req.body.userid;
     let query = `SELECT p."ID" as key, p.title, p.description, p.original_name, u.username FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID");`;
-    
+
     await elasticSearch.checkIndices("photos")
     await elasticSearch.checkBulk("photos", "users", query)
     let wantedPhotos = await elasticSearch.search("photos", "users", search)
-
     await postgres.query(`SELECT v."ID_photo" as voteIdPhoto, v."ID_user" as voteIdUser, p."ID", p.url, p."ID_user", 
     p.sumvotes, p.nvotes, p.thumbnail, u.username FROM "tsac18Rosada".photos p 
     LEFT JOIN "tsac18Rosada".votes v ON (p."ID" = v."ID_photo" AND v."ID_user"=$1) 
