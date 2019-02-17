@@ -1,5 +1,4 @@
 const elasticsearch = require('elasticsearch');
-const postgres = require('./postgres')
 const cfg = require("../config");
 
 const conn = elasticsearch.Client(cfg.elasticsearch);
@@ -12,32 +11,41 @@ module.exports = {
                     conn.indices.create({
                         index: index
                     });
-                    resolve();
                 }
-                else resolve();
             });
+            resolve();
         });
     },
-    checkBulk: function (index, type, query) {
+    
+    createDocument: function (index, type, key, username, title, description, original_name) {
         return new Promise((resolve, reject) => {
-            conn.count({ index: index, type: type }, (r, q) => {
-                if (q.count < 1) {
-                    postgres.query(query, (err, result) => {
-                        let myBody = [];
-                        for (let i = 0; i < result.rowCount; i++) {
-                            myBody.push({ index: { _index: index, _type: type, _id: i + 1, _ttl: "30m" } }, result.rows[i]);
-                        };
-                        conn.bulk({
-                            refresh: "true",
-                            body: myBody
-                        });
-                        resolve();
-                    });
+            conn.create({
+                index: index,
+                type: type,
+                id: key,
+                body: {
+                    key: key,
+                    username: username,
+                    title: title,
+                    description: description,
+                    original_name: original_name
                 }
-                else resolve();
             });
+            resolve();
         });
     },
+    
+    deleteDocument: function (index, type, id) {
+        return new Promise((resolve, reject) => {
+            conn.delete({
+                index: index,
+                type: type,
+                id: id
+            }); 
+            resolve();
+        });
+    },
+    
     search: function (index, type, search) {
         return new Promise((resolve, reject) => {
             conn.search({
@@ -59,6 +67,6 @@ module.exports = {
                 resolve(result);
             });
         });
-    }
+    } 
 }
 

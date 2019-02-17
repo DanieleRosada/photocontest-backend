@@ -5,7 +5,7 @@ const cfg = require('./config');
 const postgres = require('./structure/postgres.js');
 const redis = require('./structure/redis.js');
 const rabbit = require('./structure/rabbit.js');
-const s3Upload = require('./structure/s3upload.js');
+const s3 = require('./structure/s3.js');
 const elasticSearch = require('./structure/elasticsearch.js');
 const bcrypt = require('bcrypt-nodejs');
 const jwt = require('jsonwebtoken');
@@ -28,7 +28,7 @@ app.get('/ranking/photos', verifyToken, function (req, res) {
             WHERE nvotes>0 ORDER BY ranking DESC LIMIT 20`, [2, 1], (err, result) => {
                     if (err) { res.end(err) };
 
-                    redis.setex("photosRanking", 14400, JSON.stringify(result.rows)); //reload every 4 hours
+                    redis.setex("photosRanking", 1800, JSON.stringify(result.rows)); //reload every 30 minutes
                     res.send(result.rows);
 
                 });
@@ -47,7 +47,7 @@ app.get('/ranking/users', verifyToken, function (req, res) {
             FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID") WHERE p.nvotes>0
             GROUP BY u.username, u.email ORDER BY ranking DESC LIMIT 20`, [10, 3, 1], (err, result) => {
                     if (err) { res.end(err) };
-                    redis.setex("usersRanking", 14400, JSON.stringify(result.rows)); //reload every 4 hours
+                    redis.setex("usersRanking", 1800, JSON.stringify(result.rows)); //reload every 30 minutes
                     res.send(result.rows);
                 });
         }
@@ -148,13 +148,16 @@ app.post('/upload', upload.single("photo"), verifyToken, function (req, res) {
     let title = req.body.title;
     let description = req.body.description;
     let user_id = req.body.userid;
+    let username = req.body.username;
     let filename = Date.now() + file.originalname;
     let url = "https://d2yaijk2mdn651.cloudfront.net/photocontest/" + filename;
-    s3Upload.writeFile(filename, file.buffer, { ACL: 'public-read' }).then(function () {
+    s3.writeFile(filename, file.buffer, { ACL: 'public-read' }).then(function () {
         postgres.query(`INSERT INTO "tsac18Rosada".photos(url, "ID_user", nvotes, title, description, original_name, sumvotes) 
-        VALUES ($1, $2, 0, $3, $4, $5, 0);`, [url, user_id, title, description, file.originalname], (err, result) => {
+        VALUES ($1, $2, 0, $3, $4, $5, 0)  RETURNING "ID";`, [url, user_id, title, description, file.originalname], async (err, result) => {
                 if (err) { res.send(err); }
                 res.status(200).send();
+                await elasticSearch.checkIndices("photos")
+                await elasticSearch.createDocument("photos", "users", result.rows[0].ID, username, title, description, file.originalname)
                 rabbit.sendToQueue('url', url);
             });
     });
@@ -190,14 +193,22 @@ app.post('/owenphotos', verifyToken, function (req, res) {
     });
 });
 
-app.post('/deletephoto', verifyToken, function (req, res) {
+app.post('/deletephoto', verifyToken, async function (req, res) {
     let photo_id = req.body.idphoto;
+    let filename = [];
+    let baseUrl = 'https://d2yaijk2mdn651.cloudfront.net/photocontest/';
     postgres.query('BEGIN', (err) => {
         if (err) { res.end(err); }
         postgres.query('DELETE FROM "tsac18Rosada".votes WHERE "ID_photo"=$1', [photo_id], (err, result) => {
             if (err) { res.end(err); };
-            postgres.query('DELETE FROM "tsac18Rosada".photos WHERE "ID"=$1', [photo_id], (err, result) => {
+            postgres.query('DELETE FROM "tsac18Rosada".photos WHERE "ID"=$1 RETURNING url, thumbnail', [photo_id], (err, result) => {
                 if (err) { res.end(err); };
+                filename.push(result.rows[0].url);
+                if (result.rows[0].thumbnail) filename.push(result.rows[0].thumbnail);
+                filename.forEach(element => {
+                    let toDelete = element.replace(baseUrl, '');
+                    s3.unlink(toDelete);
+                });
                 postgres.query('COMMIT', (err) => {
                     if (err) { res.end(err) };
                     res.status(200).send();
@@ -205,21 +216,19 @@ app.post('/deletephoto', verifyToken, function (req, res) {
             });
         });
     });
+    await elasticSearch.deleteDocument("photos", "users", photo_id);
 });
 
 app.post('/search', verifyToken, async function (req, res) {
     let search = req.body.search;
     let user_id = req.body.userid;
-    let query = `SELECT p."ID" as key, p.title, p.description, p.original_name, u.username FROM "tsac18Rosada".photos p JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID");`;
+    let wantedPhotos = await elasticSearch.search("photos", "users", search);
 
-    await elasticSearch.checkIndices("photos")
-    await elasticSearch.checkBulk("photos", "users", query)
-    let wantedPhotos = await elasticSearch.search("photos", "users", search)
     await postgres.query(`SELECT v."ID_photo" as voteIdPhoto, v."ID_user" as voteIdUser, p."ID", p.url, p."ID_user", 
-    p.sumvotes, p.nvotes, p.thumbnail, u.username FROM "tsac18Rosada".photos p 
-    LEFT JOIN "tsac18Rosada".votes v ON (p."ID" = v."ID_photo" AND v."ID_user"=$1) 
-    JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID") WHERE p."ID" =  ANY ($2)
-    ORDER BY p."ID"`, [user_id, wantedPhotos], (err, result) => {
+        p.sumvotes, p.nvotes, p.thumbnail, u.username FROM "tsac18Rosada".photos p 
+        LEFT JOIN "tsac18Rosada".votes v ON (p."ID" = v."ID_photo" AND v."ID_user"=$1) 
+        JOIN "tsac18Rosada".user u ON (p."ID_user" = u."ID") WHERE p."ID" =  ANY ($2)
+        ORDER BY p."ID"`, [user_id, wantedPhotos], (err, result) => {
             if (err) { res.end(err); }
             res.send(result.rows);
         });

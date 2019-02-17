@@ -1,5 +1,5 @@
 const postgres = require('../structure/postgres');
-const s3Upload = require('../structure/s3upload');
+const s3 = require('../structure/s3');
 const rabbit = require('../structure/rabbit');
 const request = require('request');
 const sharp = require('sharp');
@@ -13,7 +13,7 @@ rabbit.reciveToQueue('url', function (url) {
             .resize(286, 220)
             .toBuffer()
             .then((data) => {
-                s3Upload.writeFile("min" + filename, data, { ACL: 'public-read' }).then(function () {
+                s3.writeFile("min" + filename, data, { ACL: 'public-read' }).then(function () {
                     var thumbnail = baseUrl + "min" + filename;
                     postgres.query('UPDATE "tsac18Rosada".photos SET thumbnail=$1 WHERE url=$2', [thumbnail, uri], (err, rows) => {
                         if (err) console.log(err);
